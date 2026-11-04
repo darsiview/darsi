@@ -83,6 +83,19 @@ async function getLk() {
   return n;
 }
 
+// ---------- مفتاح خزنة الحسابات: يُفتح على الجوال بكلمة المرور، ويُرسل مشفّراً مع الموافقة ----------
+const b64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function vaultKeyDoc() { const d = await fsReq('GET', `users/${S.uid}/vault/key`); return d && d.fields; }
+async function unwrapVk(f, password) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64(f.s.stringValue), iterations: +(f.it && f.it.integerValue || 310000), hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(f.iv.stringValue) }, key, b64(f.d.stringValue));
+  return JSON.parse(new TextDecoder().decode(pt)).k;
+}
+async function tryVault(password) {
+  try { const f = await vaultKeyDoc(); if (f) { S.vk = await unwrapVk(f, password); saveS(); } } catch {}
+}
+
 // ---------- الشاشات ----------
 const Q = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
 function loginView(note) {
@@ -97,6 +110,7 @@ function loginView(note) {
     try {
       const j = await post(`${AUTH}/accounts:signInWithPassword?key=${CFG.apiKey}`, { email: $('#em').value.trim(), password: $('#pw').value, returnSecureToken: true });
       S = { uid: j.localId, email: j.email, name: j.displayName || '', rt: j.refreshToken, idToken: j.idToken, exp: Date.now() + (+j.expiresIn - 120) * 1000 }; saveS();
+      await tryVault($('#pw').value);
       route();
     } catch (e) { $('#er').textContent = ERR[e.message] || 'تعذّر الدخول. حاولي مرة أخرى.'; b.disabled = false; b.textContent = 'دخول'; }
   };
@@ -113,17 +127,21 @@ function approveView() {
     <div class="dev">💻 ${esc(Q.n || 'جهاز')}</div>
     <p>هل تريدين الدخول بحسابكِ <b dir="ltr">${esc(S.email)}</b> على هذا الجهاز؟</p>
     <p class="mu">⚠ وافقي فقط إذا كنتِ أمام هذا الجهاز الآن وأنتِ من طلب الرمز.</p>
+    <div id="vk"></div>
     <div class="err" id="er"></div>
     <button id="yes">✓ نعم، أدخلني</button><button class="sec" id="no">لا</button></div>`;
   $('#no').onclick = () => { history.replaceState(null, '', location.pathname); homeView(); };
+  // خزنة الحسابات موجودة ولم تُفتح على هذا الجوال بعد: كلمة المرور مرة واحدة (اختياري)
+  if (!S.vk) vaultKeyDoc().then(f => { if (f && !S.vk) $('#vk').innerHTML = `<label>🔐 لتنتقل دخولاتكِ إلى مايكروسوفت وقوقل: كلمة المرور (مرة واحدة فقط، اختياري)</label><input id="vpw" type="password" autocomplete="current-password">`; }).catch(() => {});
   $('#yes').onclick = async () => {
     const b = $('#yes'); b.disabled = true; b.textContent = 'جارٍ الإرسال…';
     try {
       await idToken();
+      if (!S.vk && $('#vpw') && $('#vpw').value) await tryVault($('#vpw').value);
       const lk = await getLk();
       const key = await crypto.subtle.importKey('raw', unb64u(Q.k), 'AES-GCM', false, ['encrypt']);
       const iv = crypto.getRandomValues(new Uint8Array(12));
-      const payload = new TextEncoder().encode(JSON.stringify({ rt: S.rt, lk, uid: S.uid, email: S.email, name: S.name }));
+      const payload = new TextEncoder().encode(JSON.stringify({ rt: S.rt, lk, uid: S.uid, email: S.email, name: S.name, vk: S.vk || null }));
       const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, payload);
       const r = await fsReq('PATCH', `qr/${encodeURIComponent(Q.s)}`, { fields: { uid: { stringValue: S.uid }, iv: { stringValue: b64u(iv) }, p: { stringValue: b64u(ct) }, exp: { integerValue: String(exp || Date.now() + 120000) } } });
       if (!r) throw new Error('fail');
